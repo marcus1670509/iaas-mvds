@@ -1,0 +1,103 @@
+trigger:
+- main
+
+pool:
+  name: Default # Nome do agent pool
+  demands:
+    - Agent.Name -equals LML001  # 🔁 Força o uso do agente específico - substitua pelo nome do Agent criado
+
+  #vmImage: 'windows-latest'
+
+variables:
+  location: 'centralindia'  # (Asia Pacific) Central India - mesma região da VM manual
+  vmSku: 'Standard_B2as_v2'  # 2 vCPUs, 8 GiB - mesmo tamanho da VM manual
+  windowsOSVersion: '2025-datacenter-azure-edition'  # Windows Server 2025 Datacenter Azure Edition
+  resourceGroupName: 'rg-iac-web-iis01'
+  vmName: 'vm-iac-web-iis'
+  templateFile: 'vm-iis-template.json'
+  parametersFile: 'vm-iis-parameters.json'
+  # URLs montadas a partir do próprio repositório GitHub onde está este pipeline (owner/repo + branch)
+  repoRawUrl: 'https://raw.githubusercontent.com/$(Build.Repository.Name)/$(Build.SourceBranch)'
+  indexUrl: '$(repoRawUrl)/src/index.html'
+  scriptUrl: '$(repoRawUrl)/src/scripts/site.ps1'
+
+stages:
+- stage: DeployInfra
+  displayName: 'Provisionar Infraestrutura'
+  jobs:
+  - job: Deploy
+    displayName: 'Criar RG e recursos ARM'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Criar Resource Group'
+      inputs:
+        azureSubscription: 'SCll01'  # 🔁 Substitua pelo nome do Service Connection criado
+        scriptType: 'ps'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Cria o RG apenas se ainda não existir (um RG existente em outra região faria o 'az group create' falhar)
+          if ((az group exists --name $(resourceGroupName)) -eq 'false') {
+            az group create --name $(resourceGroupName) --location $(location)
+          } else {
+            Write-Host 'Resource Group $(resourceGroupName) já existe - os recursos serão criados em $(location).'
+          }
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Deploy ARM Template'
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: 'SCll01'  # 🔁 Substitua pelo nome do Service Connection criado
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroupName)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: 'arm-templates/vm-iis-template.json'
+        csmParametersFile: 'arm-templates/vm-iis-parameters.json'
+        overrideParameters: '-location $(location) -vmSku $(vmSku) -windowsOSVersion $(windowsOSVersion) -adminPassword $(adminPassword)'  # adminPassword = variável secreta criada em Variables
+        deploymentMode: 'Incremental'
+        deploymentName: 'vm-iis-deployment'
+
+- stage: ConfigureWebsite
+  displayName: 'Publicar site no IIS'
+  dependsOn: DeployInfra
+  jobs:
+  - job: PublishHTML
+    displayName: 'Executar CustomScriptExtension para copiar index.html'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Executar CustomScriptExtension'
+      inputs:
+        azureSubscription: 'SCll01'  # 🔁 Substitua pelo nome do Service Connection criado
+        scriptType: 'ps'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          $vmName = '$(vmName)'
+          $resourceGroup = '$(resourceGroupName)'
+          $scriptUrl = '$(scriptUrl)'
+          $indexUrl = '$(indexUrl)'
+          Write-Host "Script: $scriptUrl"
+          Write-Host "Index : $indexUrl"
+
+          # Define o conteúdo JSON como um objeto PowerShell
+          # (baixa o site.ps1 e o index.html do repositório para a mesma pasta na VM)
+          $settings = @{
+            fileUris = @($scriptUrl, $indexUrl)
+            commandToExecute = "powershell -ExecutionPolicy Unrestricted -File site.ps1"
+          }
+
+          # Converte para JSON válido e salva em um arquivo temporário no agente
+          $jsonFile = "customScriptSettings.json"
+          $settings | ConvertTo-Json -Depth 3 | Out-File -FilePath $jsonFile -Encoding ascii
+
+          # Executa a extensão passando o caminho do arquivo JSON
+          # A VM só aceita uma CustomScriptExtension: reutiliza a instância 'InstallIIS' criada pelo ARM template
+          # --force-update garante nova execução mesmo que as configurações não tenham mudado
+          az vm extension set `
+            --resource-group $resourceGroup `
+            --vm-name $vmName `
+            --name CustomScriptExtension `
+            --publisher Microsoft.Compute `
+            --extension-instance-name InstallIIS `
+            --force-update `
+            --settings @$jsonFile # Usa @ para indicar que é um caminho de arquivo
+  # fim
