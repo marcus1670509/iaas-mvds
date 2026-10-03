@@ -1,0 +1,21 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "vmName": {
+            "value": "vm-iac-web-iis"
+        },
+        "location": {
+            "value": "centralindia"
+        },
+        "adminUsername": {
+            "value": "vedadmin"
+        },
+        "vmSku": {
+            "value": "Standard_B2as_v2"
+        },
+        "windowsOSVersion": {
+            "value": "2025-datacenter-azure-edition"
+        }
+    }
+}
